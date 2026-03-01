@@ -5,6 +5,28 @@ from collections import defaultdict
 from openai import OpenAI
 from dotenv import load_dotenv
 from tavily import TavilyClient
+import sys
+import os
+
+# ПРИНУДИТЕЛЬНАЯ очистка от конфликтующих аргументов
+import httpx
+original_init = httpx.Client.__init__
+
+def patched_init(self, *args, **kwargs):
+    if 'proxies' in kwargs:
+        del kwargs['proxies']  # Удаляем проблемный аргумент
+    original_init(self, *args, **kwargs)
+
+httpx.Client.__init__ = patched_init
+httpx.AsyncClient.__init__ = patched_init
+
+# Дальше твой обычный код
+import telebot
+from collections import defaultdict
+from openai import OpenAI
+from dotenv import load_dotenv
+from tavily import TavilyClient
+import time
 
 # Загружаем ключи из .env
 load_dotenv()
