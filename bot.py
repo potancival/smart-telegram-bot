@@ -1,466 +1,284 @@
-import sys
-import platform
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import telebot
 import time
 import os
-import json
+import sys
+import random
+import requests
 from collections import defaultdict
 from datetime import datetime
 from dotenv import load_dotenv
 from tavily import TavilyClient
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from rag_system import rag
 
-# ========== ПРОВЕРКА ВЕРСИИ PYTHON ==========
-print(f"\n{'='*60}")
-print(f"🐍 Python version: {sys.version}")
-print(f"💻 Platform: {platform.platform()}")
-print(f"📍 Expected: 3.11.x (для совместимости)")
-print(f"{'='*60}\n")
-
-# Предупреждение, если версия не 3.11
-if sys.version_info[:2] != (3, 11):
-    print("⚠️  ВНИМАНИЕ: Запуск на Python {}.{}".format(sys.version_info[0], sys.version_info[1]))
-    print("   Рекомендуется Python 3.11 для максимальной совместимости\n")
-
-# ========== ЗАГРУЗКА ПЕРЕМЕННЫХ ==========
+# Загружаем переменные окружения
 load_dotenv()
 
-# ========== ТВОИ КЛЮЧИ ИЗ .ENV ==========
+# ========== ПРОВЕРКА КЛЮЧЕЙ ==========
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-# Проверка наличия ключей
-if not TELEGRAM_TOKEN:
-    print("❌ КРИТИЧЕСКАЯ ОШИБКА: Нет TELEGRAM_TOKEN в .env файле!")
-    print("   Добавь строку: TELEGRAM_TOKEN=твой_токен")
+if not TELEGRAM_TOKEN or not GITHUB_TOKEN:
+    print("❌ Ошибка: Нет токенов в .env файле!")
     sys.exit(1)
 
-if not GITHUB_TOKEN:
-    print("❌ КРИТИЧЕСКАЯ ОШИБКА: Нет GITHUB_TOKEN в .env файле!")
-    print("   Добавь строку: GITHUB_TOKEN=github_pat_...")
-    sys.exit(1)
+# ========== НАСТРОЙКИ БОТА ==========
+BOT_NAME = "Владос"
+BOT_AGE = 67
+BOT_PERSONALITY = (
+    f"Меня зовут {BOT_NAME}, мне {BOT_AGE} лет. "
+    "Я мудрый, слегка ворчливый, но добрый дед. "
+    "Люблю помогать, но не терплю глупости."
+)
 
-print("=" * 60)
-print("🚀 ЗАПУСК УМНОГО БОТА НА GITHUB MODELS")
-print("=" * 60)
-print(f"📱 Telegram токен: {TELEGRAM_TOKEN[:10]}...")
-print(f"🔑 GitHub токен: {GITHUB_TOKEN[:10]}...")
-if TAVILY_API_KEY:
-    print(f"🌐 Tavily ключ: {TAVILY_API_KEY[:15]}...")
-else:
-    print("🌐 Tavily: не используется (поиск отключён)")
-
-# ========== НАСТРОЙКА SESSION С ПОВТОРНЫМИ ПОПЫТКАМИ ==========
-def create_requests_session():
-    """Создаёт сессию с повторными попытками при ошибках"""
-    session = requests.Session()
-    retry_strategy = Retry(
-        total=3,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],
-        backoff_factor=1
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
+# Настройки активности
+CHAT_ACTIVITY = defaultdict(lambda: 30)
+last_message_time = defaultdict(float)
 
 # ========== ИНИЦИАЛИЗАЦИЯ ==========
-
-# Telegram бот
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# Tavily для поиска в интернете (если есть ключ)
 tavily = None
 if TAVILY_API_KEY:
     try:
         tavily = TavilyClient(api_key=TAVILY_API_KEY)
-        print("✅ Tavily подключен для поиска в интернете")
+        print("✅ Tavily подключен")
     except Exception as e:
-        print(f"⚠️ Ошибка подключения Tavily: {e}")
+        print(f"⚠️ Ошибка Tavily: {e}")
 
-# Хранилище истории разговоров
-conversation_history = defaultdict(list)
-MAX_HISTORY = 20
-
-# Очистка старых подключений Telegram
-print("🔄 Очистка старых подключений...")
-bot.remove_webhook()
-time.sleep(1)
-
-# ========== НАСТРОЙКИ GITHUB MODELS ==========
+# GitHub Models
 GITHUB_MODELS_URL = "https://models.inference.ai.azure.com/chat/completions"
 HEADERS = {
     "Authorization": f"Bearer {GITHUB_TOKEN}",
     "Content-Type": "application/json"
 }
 
-# Список доступных бесплатных моделей
-AVAILABLE_MODELS = {
-    "gpt4o_mini": "gpt-4o-mini",
-    "gpt4o": "gpt-4o",
-    "gpt4": "gpt-4",
-    "gpt35": "gpt-3.5-turbo",
-}
+conversation_history = defaultdict(list)
+MAX_HISTORY = 20
 
-# Текущая модель (по умолчанию)
-current_model = AVAILABLE_MODELS["gpt4o_mini"]
+bot.remove_webhook()
+time.sleep(1)
+
+print(f"✅ Бот {BOT_NAME} ({BOT_AGE} лет) готов к работе!")
 
 # ========== ФУНКЦИИ ==========
 
-def call_github_models(messages, model=None, max_tokens=1000, temperature=0.7):
-    """
-    Прямой вызов GitHub Models API через requests
-    (без использования OpenAI SDK, который вызывает проблемы с Pydantic)
-    """
+def call_github_models(messages):
+    """Вызов GitHub Models API"""
     try:
-        model = model or current_model
-        
-        # Формируем запрос
         payload = {
-            "model": model,
+            "model": "gpt-4o-mini",
             "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": False
+            "temperature": 0.7,
+            "max_tokens": 1000
         }
         
-        # Создаём сессию с повторными попытками
-        session = create_requests_session()
-        
-        # Отправляем запрос
-        response = session.post(
+        response = requests.post(
             GITHUB_MODELS_URL,
             headers=HEADERS,
             json=payload,
             timeout=30
         )
         
-        # Проверяем ответ
         response.raise_for_status()
-        
-        # Парсим JSON
         result = response.json()
         
-        # Извлекаем ответ
         if 'choices' in result and len(result['choices']) > 0:
             return result['choices'][0]['message']['content']
-        else:
-            return "😔 Не удалось получить ответ от модели"
-            
-    except requests.exceptions.Timeout:
-        return "⏱️ Превышено время ожидания ответа от GitHub Models"
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            return "🔑 Ошибка авторизации: проверь GitHub токен"
-        elif e.response.status_code == 429:
-            return "⏳ Слишком много запросов. Попробуй позже"
-        else:
-            return f"🌐 Ошибка HTTP: {e}"
-    except Exception as e:
-        print(f"❌ Ошибка вызова GitHub Models: {e}")
-        return f"😔 Извини, техническая ошибка: {str(e)[:100]}"
-
-def get_ai_response(user_message, chat_id):
-    """Получение ответа от GitHub Models с учётом истории"""
-    try:
-        # Получаем последние 10 сообщений из истории
-        history = conversation_history[chat_id][-10:]
-        
-        # Формируем сообщения для API
-        messages = [
-            {"role": "system", "content": "Ты дружелюбный ассистент в Telegram. Отвечай кратко, по делу и используй эмодзи. Отвечай на том же языке, на котором задан вопрос."}
-        ]
-        
-        # Добавляем историю разговора
-        for msg in history:
-            messages.append({"role": msg['role'], "content": msg['content']})
-        
-        # Добавляем текущее сообщение
-        messages.append({"role": "user", "content": user_message})
-        
-        # Отправляем запрос напрямую через requests
-        response_text = call_github_models(messages)
-        
-        return response_text
+        return "😔 Не удалось получить ответ"
         
     except Exception as e:
-        print(f"❌ Ошибка в get_ai_response: {e}")
-        return f"😔 Извини, внутренняя ошибка: {str(e)[:100]}"
+        print(f"❌ Ошибка GitHub Models: {e}")
+        return f"😔 Ошибка: {str(e)[:100]}"
 
-def search_web(query):
-    """Поиск в интернете через Tavily"""
-    if not tavily:
-        return "🔍 Поиск в интернете отключён (нет API ключа Tavily)"
-    
+def get_ai_response(user_message, chat_id, user_name="Пользователь"):
+    """Получение ответа с учётом RAG"""
     try:
-        print(f"🔍 Поиск в интернете: {query}")
+        current_date = datetime.now().strftime("%d.%m.%Y")
+        chat_context = rag.get_chat_context(chat_id, hours=24)
         
-        result = tavily.search(
-            query=query,
-            search_depth="basic",
-            max_results=3,
-            include_answer=True
+        personality_prompt = (
+            f"{BOT_PERSONALITY}\n"
+            f"Сегодня {current_date}. Ты общаешься с {user_name}.\n"
         )
         
-        response = f"🔍 **Результаты поиска:**\n\n"
+        if chat_context:
+            personality_prompt += f"\nКонтекст недавнего разговора:\n{chat_context}\n"
         
-        if result.get('answer'):
-            response += f"📌 {result['answer']}\n\n"
+        messages = [
+            {"role": "system", "content": personality_prompt},
+            {"role": "user", "content": user_message}
+        ]
         
-        if result.get('results'):
-            response += "📰 **Источники:**\n"
-            for i, r in enumerate(result['results'][:3], 1):
-                response += f"{i}. [{r['title']}]({r['url']})\n"
-                if r.get('content'):
-                    response += f"   _{r['content'][:100]}..._\n\n"
+        response = call_github_models(messages)
+        rag.add_conversation(chat_id, user_name, user_message, response)
         
         return response
         
     except Exception as e:
-        print(f"❌ Ошибка поиска: {e}")
-        return f"❌ Ошибка при поиске: {e}"
+        print(f"❌ Ошибка: {e}")
+        return f"😔 Извини, {user_name}, у меня что-то с памятью стало..."
+
+def search_web(query):
+    """Поиск в интернете через Tavily"""
+    if not tavily:
+        return "🔍 Поиск отключён"
+    
+    try:
+        result = tavily.search(query=query, max_results=3, include_answer=True)
+        response = f"🔍 **Результаты поиска:**\n\n"
+        if result.get('answer'):
+            response += f"📌 {result['answer']}\n\n"
+        return response
+    except Exception as e:
+        return f"❌ Ошибка поиска: {e}"
 
 def should_respond(message):
-    """Проверяет, нужно ли отвечать на сообщение"""
-    # В личных сообщениях отвечаем всегда
+    """Проверка, нужно ли отвечать"""
     if message.chat.type == "private":
         return True
     
-    # В группах проверяем условия
     bot_username = bot.get_me().username
     
-    # Если бота упомянули
     if message.text and f"@{bot_username}" in message.text:
         return True
     
-    # Если это ответ на сообщение бота
     if message.reply_to_message and message.reply_to_message.from_user.id == bot.get_me().id:
+        return True
+    
+    now = time.time()
+    activity = CHAT_ACTIVITY[message.chat.id]
+    
+    if activity == 0:
+        return False
+    
+    if message.chat.id in last_message_time:
+        if now - last_message_time[message.chat.id] < 60:
+            return False
+    
+    if random.randint(1, 100) <= activity:
+        last_message_time[message.chat.id] = now
         return True
     
     return False
 
-# ========== ПРОВЕРКА ПОДКЛЮЧЕНИЯ ==========
-print("🔄 Проверка подключения к GitHub Models...")
-try:
-    test_messages = [
-        {"role": "system", "content": "Ты ассистент"},
-        {"role": "user", "content": "Привет, проверка связи"}
-    ]
-    test_response = call_github_models(test_messages, max_tokens=10)
-    if test_response and not test_response.startswith("😔"):
-        print("✅ GitHub Models подключен успешно!")
-        print("💰 Статус: БЕСПЛАТНО")
-        print("🌍 Доступ: ИЗ ЛЮБОГО РЕГИОНА")
-    else:
-        print(f"⚠️ GitHub Models ответил: {test_response}")
-except Exception as e:
-    print(f"⚠️ Предупреждение при проверке GitHub Models: {e}")
-    print("   Бот продолжит работу, но AI может быть недоступен")
-
-print("=" * 60)
-
-# ========== ОБРАБОТЧИКИ КОМАНД ==========
+# ========== КОМАНДЫ ==========
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
-    """Приветственное сообщение"""
     welcome = (
-        "👋 **Привет! Я умный бот на GitHub Models**\n\n"
-        "🤖 **Что я умею:**\n"
-        "• Отвечать на любые вопросы (GPT-4o и другие модели)\n"
-        "• Искать информацию в интернете\n"
-        "• Помнить историю разговора\n"
-        "• Работать в групповых чатах\n\n"
+        f"👴 **Привет! Я {BOT_NAME}, мне {BOT_AGE} лет.**\n\n"
         "📌 **Команды:**\n"
         "🔍 `/search запрос` - поиск в интернете\n"
-        "🔄 `/model` - сменить модель AI\n"
-        "🧹 `/clear` - очистить историю\n"
-        "ℹ️ `/info` - информация о боте\n\n"
-        f"💬 **В группах:** упоминай меня @{bot.get_me().username}"
+        "📊 `/activ [0-100]` - установить активность\n"
+        "📚 `/knowledge` - статистика базы знаний\n"
+        "🧹 `/clear` - очистить историю\n\n"
+        f"💬 Активность в чате: {CHAT_ACTIVITY[message.chat.id]}%"
     )
     bot.reply_to(message, welcome, parse_mode="Markdown")
 
-@bot.message_handler(commands=['info'])
-def info_command(message):
-    """Информация о боте"""
-    info_text = (
-        "ℹ️ **Информация о боте:**\n\n"
-        "• **Провайдер:** GitHub Models (бесплатно)\n"
-        f"• **Текущая модель:** {current_model}\n"
-        "• **Доступ:** ИЗ ЛЮБОГО РЕГИОНА\n"
-        "• **Поиск:** Tavily API\n"
-        "• **Память:** 20 последних сообщений\n"
-        f"• **Версия Python:** {sys.version_info.major}.{sys.version_info.minor}"
-    )
-    bot.reply_to(message, info_text, parse_mode="Markdown")
+@bot.message_handler(commands=['activ'])
+def activity_command(message):
+    chat_id = message.chat.id
+    
+    if message.chat.type != "private":
+        user_status = bot.get_chat_member(chat_id, message.from_user.id).status
+        if user_status not in ['administrator', 'creator']:
+            bot.reply_to(message, "👴 Только админы могут менять мою активность!")
+            return
+    
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            bot.reply_to(message, f"📊 Текущая активность: {CHAT_ACTIVITY[chat_id]}%\nИспользование: /activ число (0-100)")
+            return
+        
+        new_activity = int(parts[1])
+        if 0 <= new_activity <= 100:
+            CHAT_ACTIVITY[chat_id] = new_activity
+            bot.reply_to(message, f"✅ Активность изменена на {new_activity}%")
+        else:
+            bot.reply_to(message, "👴 Число должно быть от 0 до 100!")
+    except ValueError:
+        bot.reply_to(message, "👴 Напиши число, например: /activ 50")
 
-@bot.message_handler(commands=['model'])
-def model_command(message):
-    """Смена модели AI"""
-    keyboard = telebot.types.InlineKeyboardMarkup(row_width=1)
-    
-    for key, model in AVAILABLE_MODELS.items():
-        # Красивое название для отображения
-        display_name = {
-            "gpt4o_mini": "🤖 GPT-4o Mini (быстрый, бесплатный)",
-            "gpt4o": "🚀 GPT-4o (мощный)",
-            "gpt4": "🧠 GPT-4 (классический)",
-            "gpt35": "⚡ GPT-3.5 Turbo (очень быстрый)"
-        }.get(key, model)
-        
-        btn = telebot.types.InlineKeyboardButton(
-            f"{display_name}", 
-            callback_data=f"model_{key}"
-        )
-        keyboard.add(btn)
-    
-    bot.send_message(
-        message.chat.id,
-        "🎯 **Выбери модель AI:**\n\n"
-        "Все модели бесплатны в GitHub Models!",
-        reply_markup=keyboard,
-        parse_mode="Markdown"
+@bot.message_handler(commands=['knowledge'])
+def knowledge_command(message):
+    stats = rag.get_stats()
+    response = (
+        "📚 **База знаний RAG:**\n\n"
+        f"• Всего знаний: {stats['knowledge']}\n"
+        f"• Сохранено диалогов: {stats['conversations']}\n"
+        f"• Фактов о пользователях: {stats['user_facts']}\n\n"
+        "Чем больше общаемся, тем умнее я становлюсь!"
     )
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith('model_'))
-def model_callback(call):
-    """Обработка выбора модели"""
-    global current_model
-    model_key = call.data.replace('model_', '')
-    
-    if model_key in AVAILABLE_MODELS:
-        current_model = AVAILABLE_MODELS[model_key]
-        
-        # Красивое название
-        display_names = {
-            "gpt4o_mini": "GPT-4o Mini",
-            "gpt4o": "GPT-4o",
-            "gpt4": "GPT-4",
-            "gpt35": "GPT-3.5 Turbo"
-        }
-        
-        bot.edit_message_text(
-            f"✅ Модель изменена на: **{display_names.get(model_key, model_key)}**\n\nТеперь я буду использовать эту модель для ответов.",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown"
-        )
-        
-        bot.answer_callback_query(call.id, f"Модель изменена")
-    else:
-        bot.answer_callback_query(call.id, "Неизвестная модель")
+    bot.reply_to(message, response, parse_mode="Markdown")
 
 @bot.message_handler(commands=['search'])
 def search_command(message):
-    """Поиск в интернете"""
-    # Получаем текст запроса
     query = message.text.replace('/search', '', 1).strip()
-    
     if not query:
-        bot.reply_to(message, "🔍 Напиши запрос после команды, например: /search погода в Москве")
+        bot.reply_to(message, "🔍 Напиши запрос после команды")
         return
     
     if not tavily:
-        bot.reply_to(message, "❌ Поиск не доступен: нет API ключа Tavily в .env файле")
+        bot.reply_to(message, "❌ Поиск отключён (нет Tavily ключа)")
         return
     
-    # Отправляем сообщение, что ищем
-    status_msg = bot.reply_to(message, f"🔎 Ищу в интернете: _{query}_...", parse_mode="Markdown")
-    
-    # Выполняем поиск
+    status = bot.reply_to(message, f"🔎 Ищу: {query}...")
     result = search_web(query)
-    
-    try:
-        # Обновляем сообщение с результатами
-        bot.edit_message_text(
-            result,
-            chat_id=message.chat.id,
-            message_id=status_msg.message_id,
-            parse_mode="Markdown",
-            disable_web_page_preview=True
-        )
-    except Exception as e:
-        # Если ошибка, отправляем новым сообщением
-        bot.reply_to(message, result, parse_mode="Markdown", disable_web_page_preview=True)
+    bot.edit_message_text(result, message.chat.id, status.message_id, parse_mode="Markdown")
 
 @bot.message_handler(commands=['clear'])
 def clear_command(message):
-    """Очистка истории"""
-    chat_id = message.chat.id
-    conversation_history[chat_id] = []
+    conversation_history[message.chat.id] = []
     bot.reply_to(message, "🧹 История диалога очищена!")
 
-# ========== ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ==========
+# ========== ОСНОВНОЙ ОБРАБОТЧИК ==========
 @bot.message_handler(func=lambda message: True, content_types=['text'])
 def handle_message(message):
-    """Обрабатывает все текстовые сообщения"""
-    
-    # Проверяем, нужно ли отвечать
     if not should_respond(message):
         return
     
-    # Показываем статус "печатает"
     bot.send_chat_action(message.chat.id, 'typing')
     
-    # Получаем текст сообщения
     user_text = message.text
     chat_id = message.chat.id
-    username = message.from_user.first_name or "Пользователь"
+    user_name = message.from_user.first_name or "Пользователь"
     
-    # Убираем упоминание бота из текста
     bot_username = bot.get_me().username
     if f"@{bot_username}" in user_text:
         user_text = user_text.replace(f"@{bot_username}", "").strip()
     
-    # Логируем в консоль
-    print(f"\n{'='*50}")
-    print(f"📨 [{datetime.now().strftime('%H:%M:%S')}] Чат: {chat_id} | От: {username}")
-    print(f"📝 Вопрос: {user_text}")
-    print(f"🤖 Модель: {current_model}")
+    print(f"\n📨 [{datetime.now().strftime('%H:%M:%S')}] {user_name}: {user_text}")
     
-    # Получаем ответ от AI
-    response = get_ai_response(user_text, chat_id)
+    response = get_ai_response(user_text, chat_id, user_name)
     
-    # Сохраняем в историю
     conversation_history[chat_id].append({"role": "user", "content": user_text})
     conversation_history[chat_id].append({"role": "assistant", "content": response})
     
-    # Ограничиваем длину истории
     if len(conversation_history[chat_id]) > MAX_HISTORY:
         conversation_history[chat_id] = conversation_history[chat_id][-MAX_HISTORY:]
     
-    # Отправляем ответ
-    try:
-        bot.reply_to(message, response)
-        print(f"💬 Ответ: {response[:100]}...")
-    except Exception as e:
-        print(f"❌ Ошибка отправки: {e}")
-        bot.reply_to(message, "😔 Произошла ошибка при отправке ответа")
+    bot.reply_to(message, response)
+    print(f"💬 {BOT_NAME}: {response[:100]}...")
 
-# ========== ЗАПУСК БОТА ==========
+# ========== ЗАПУСК ==========
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("🚀 УМНЫЙ TELEGRAM БОТ УСПЕШНО ЗАПУЩЕН!")
+    print(f"🚀 БОТ {BOT_NAME.upper()} ЗАПУЩЕН НА RENDER!")
     print("=" * 60)
-    print(f"📱 Имя бота: @{bot.get_me().username}")
-    print(f"🤖 Провайдер: GitHub Models (прямые HTTP запросы)")
-    print(f"🌍 Доступ: ИЗ ЛЮБОГО РЕГИОНА")
-    print(f"💰 Цена: ПОЛНОСТЬЮ БЕСПЛАТНО")
-    print(f"📚 Память: {MAX_HISTORY} сообщений")
-    print(f"🤖 Модель по умолчанию: {current_model}")
+    print(f"👴 Имя: {BOT_NAME}, {BOT_AGE} лет")
+    print(f"📱 Username: @{bot.get_me().username}")
+    print(f"📚 RAG: активен (база: knowledge.db)")
     print("=" * 60)
-    print("✅ Бот работает! Нажми Ctrl+C для остановки")
-    print("📝 Логи сообщений будут появляться здесь:")
+    print("✅ Бот работает! Render будет держать его 24/7")
     print("-" * 60)
     
     try:
         bot.infinity_polling()
-    except KeyboardInterrupt:
-        print("\n👋 Бот остановлен пользователем")
     except Exception as e:
-        print(f"\n❌ Критическая ошибка: {e}")
-        print("🔧 Перезапусти бота командой: python bot.py")
+        print(f"\n❌ Ошибка: {e}")

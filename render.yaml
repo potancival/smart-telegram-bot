@@ -2,7 +2,8 @@ services:
   - type: worker
     name: smart-telegram-bot
     runtime: python
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    region: frankfurt  # или Singapore, если ближе
+    buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     plan: free
     envVars:
