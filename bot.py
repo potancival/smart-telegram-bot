@@ -6,44 +6,28 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from tavily import TavilyClient
 import sys
-import os
 
-# ПРИНУДИТЕЛЬНАЯ очистка от конфликтующих аргументов
-import httpx
-original_init = httpx.Client.__init__
-
-def patched_init(self, *args, **kwargs):
-    if 'proxies' in kwargs:
-        del kwargs['proxies']  # Удаляем проблемный аргумент
-    original_init(self, *args, **kwargs)
-
-httpx.Client.__init__ = patched_init
-httpx.AsyncClient.__init__ = patched_init
-
-# Дальше твой обычный код
-import telebot
-from collections import defaultdict
-from openai import OpenAI
-from dotenv import load_dotenv
-from tavily import TavilyClient
-import time
-
-# Загружаем ключи из .env
+# Загружаем переменные окружения из .env файла
 load_dotenv()
 
-# ========== ТВОИ КЛЮЧИ ==========
+# ========== ПРОВЕРКА ВЕРСИЙ ==========
+print(f"🐍 Python version: {sys.version}")
+print(f="="*60)
+
+# ========== ТВОИ КЛЮЧИ ИЗ .ENV ==========
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")  # GitHub Personal Access Token
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
-# Проверка ключей
+# Проверка наличия ключей
 if not TELEGRAM_TOKEN:
     print("❌ ОШИБКА: Нет TELEGRAM_TOKEN в .env файле!")
+    print("Добавь строку: TELEGRAM_TOKEN=твой_токен")
     exit(1)
 
 if not GITHUB_TOKEN:
     print("❌ ОШИБКА: Нет GITHUB_TOKEN в .env файле!")
-    print("Получи токен на https://github.com/settings/tokens")
+    print("Добавь строку: GITHUB_TOKEN=github_pat_...")
     exit(1)
 
 print("=" * 60)
@@ -51,19 +35,22 @@ print("🚀 ЗАПУСК УМНОГО БОТА НА GITHUB MODELS")
 print("=" * 60)
 print(f"📱 Telegram токен: {TELEGRAM_TOKEN[:10]}...")
 print(f"🔑 GitHub токен: {GITHUB_TOKEN[:10]}...")
-print(f"🌐 Tavily ключ: {TAVILY_API_KEY[:15]}..." if TAVILY_API_KEY else "🌐 Tavily: не используется")
+if TAVILY_API_KEY:
+    print(f"🌐 Tavily ключ: {TAVILY_API_KEY[:15]}...")
+else:
+    print("🌐 Tavily: не используется (поиск отключён)")
 
 # ========== ИНИЦИАЛИЗАЦИЯ GITHUB MODELS ==========
-# GitHub Models использует OpenAI-совместимый API [citation:10]
+# Официальный эндпоинт GitHub Models
 client = OpenAI(
-    base_url="https://models.github.ai/inference",  # Новый официальный эндпоинт [citation:8][citation:9]
+    base_url="https://models.inference.ai.azure.com",
     api_key=GITHUB_TOKEN,
 )
 
 # Telegram бот
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# Tavily для поиска
+# Tavily для поиска в интернете
 tavily = None
 if TAVILY_API_KEY:
     try:
@@ -84,44 +71,36 @@ time.sleep(1)
 # Проверка подключения к GitHub Models
 print("🔄 Проверка подключения к GitHub Models...")
 try:
-    # Используем бесплатную модель для теста [citation:10]
+    # Пробуем получить список моделей или сделать тестовый запрос
     test_response = client.chat.completions.create(
-        model="openai/gpt-4o-mini",  # Важно! Формат: "провайдер/модель" [citation:8]
+        model="gpt-4o-mini",
         messages=[{"role": "user", "content": "Привет"}],
-        max_tokens=10,
+        max_tokens=5,
         temperature=0.7
     )
     print("✅ GitHub Models подключен успешно!")
-    print("💰 Статус: ПОЛНОСТЬЮ БЕСПЛАТНО")
+    print("💰 Статус: БЕСПЛАТНО (в рамках GitHub Models)")
     print("🌍 Доступ: ИЗ ЛЮБОГО РЕГИОНА")
 except Exception as e:
     print(f"❌ Ошибка подключения к GitHub Models: {e}")
-    print("\n💡 Возможные причины:")
-    print("   1. Неверный GitHub токен - проверь permissions (нужен доступ к Models)")
-    print("   2. Токен просрочен - создай новый")
-    print("   3. Нет интернета - проверь соединение")
-    exit(1)
+    print("⚠️ Бот продолжит работу, но AI-функции могут быть недоступны")
 
-# Список доступных бесплатных моделей GitHub Models [citation:5][citation:10]
-FREE_MODELS = {
-    "gpt4o_mini": "openai/gpt-4o-mini",        # Быстрая, дешевая
-    "gpt4o": "openai/gpt-4o",                   # Мощная
-    "deepseek": "deepseek-ai/DeepSeek-R1",      # Отличный русский язык
-    "llama": "meta-llama/Meta-Llama-3.1-8B-Instruct",  # Открытая модель
-    "mistral": "mistralai/Mistral-Small-24B-Instruct-2501",  # Хороша для диалогов
+# Список доступных моделей GitHub Models
+AVAILABLE_MODELS = {
+    "gpt4o_mini": "gpt-4o-mini",              # Быстрая, бесплатная
+    "gpt4o": "gpt-4o",                         # Мощная
+    "gpt4": "gpt-4",                           # Классическая
+    "gpt35": "gpt-3.5-turbo",                  # Ещё быстрее
 }
 
 # Текущая модель (по умолчанию)
-current_model = FREE_MODELS["gpt4o_mini"]
+current_model = AVAILABLE_MODELS["gpt4o_mini"]
 
 # ========== ФУНКЦИИ ==========
 
-def get_github_models_response(user_message, chat_id, model_name=None):
+def get_ai_response(user_message, chat_id):
     """Получение ответа от GitHub Models с учётом истории"""
     try:
-        # Выбираем модель
-        model = model_name or current_model
-        
         # Получаем последние 10 сообщений из истории
         history = conversation_history[chat_id][-10:]
         
@@ -139,7 +118,7 @@ def get_github_models_response(user_message, chat_id, model_name=None):
         
         # Отправляем запрос к GitHub Models
         response = client.chat.completions.create(
-            model=model,
+            model=current_model,
             messages=messages,
             temperature=0.7,
             max_tokens=1000,
@@ -155,7 +134,7 @@ def get_github_models_response(user_message, chat_id, model_name=None):
 def search_web(query):
     """Поиск в интернете через Tavily"""
     if not tavily:
-        return "🔍 Поиск не доступен (нет API ключа Tavily)"
+        return "🔍 Поиск в интернете отключён (нет API ключа Tavily)"
     
     try:
         print(f"🔍 Поиск в интернете: {query}")
@@ -212,7 +191,7 @@ def start_command(message):
     welcome = (
         "👋 **Привет! Я умный бот на GitHub Models**\n\n"
         "🤖 **Что я умею:**\n"
-        "• Отвечать на любые вопросы (GPT-4o, DeepSeek, Llama)\n"
+        "• Отвечать на любые вопросы (GPT-4o и другие модели)\n"
         "• Искать информацию в интернете\n"
         "• Помнить историю разговора\n"
         "• Работать в групповых чатах\n\n"
@@ -235,8 +214,7 @@ def info_command(message):
         "• **Доступ:** ИЗ ЛЮБОГО РЕГИОНА\n"
         "• **Стоимость:** ПОЛНОСТЬЮ БЕСПЛАТНО\n"
         "• **Поиск:** Tavily API\n"
-        "• **Память:** 20 последних сообщений\n"
-        "• **Приватность:** Данные не используются для обучения [citation:5]"
+        "• **Память:** 20 последних сообщений"
     )
     bot.reply_to(message, info_text, parse_mode="Markdown")
 
@@ -245,14 +223,13 @@ def model_command(message):
     """Смена модели AI"""
     keyboard = telebot.types.InlineKeyboardMarkup(row_width=1)
     
-    for key, model in FREE_MODELS.items():
+    for key, model in AVAILABLE_MODELS.items():
         # Красивое название для отображения
         display_name = {
-            "gpt4o_mini": "🤖 GPT-4o Mini (быстрый)",
+            "gpt4o_mini": "🤖 GPT-4o Mini (быстрый, бесплатный)",
             "gpt4o": "🚀 GPT-4o (мощный)",
-            "deepseek": "🧠 DeepSeek-R1 (русский)",
-            "llama": "🦙 Llama 3.1 8B",
-            "mistral": "🌪️ Mistral Small"
+            "gpt4": "🧠 GPT-4 (классический)",
+            "gpt35": "⚡ GPT-3.5 Turbo (очень быстрый)"
         }.get(key, model)
         
         btn = telebot.types.InlineKeyboardButton(
@@ -264,7 +241,7 @@ def model_command(message):
     bot.send_message(
         message.chat.id,
         "🎯 **Выбери модель AI:**\n\n"
-        "Все модели полностью бесплатны на GitHub Models!",
+        "Все модели бесплатны в GitHub Models!",
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
@@ -275,16 +252,15 @@ def model_callback(call):
     global current_model
     model_key = call.data.replace('model_', '')
     
-    if model_key in FREE_MODELS:
-        current_model = FREE_MODELS[model_key]
+    if model_key in AVAILABLE_MODELS:
+        current_model = AVAILABLE_MODELS[model_key]
         
         # Красивое название
         display_names = {
             "gpt4o_mini": "GPT-4o Mini",
             "gpt4o": "GPT-4o",
-            "deepseek": "DeepSeek-R1",
-            "llama": "Llama 3.1",
-            "mistral": "Mistral Small"
+            "gpt4": "GPT-4",
+            "gpt35": "GPT-3.5 Turbo"
         }
         
         bot.edit_message_text(
@@ -366,8 +342,8 @@ def handle_message(message):
     print(f"📝 Вопрос: {user_text}")
     print(f"🤖 Модель: {current_model}")
     
-    # Получаем ответ от GitHub Models
-    response = get_github_models_response(user_text, chat_id)
+    # Получаем ответ от AI
+    response = get_ai_response(user_text, chat_id)
     
     # Сохраняем в историю
     conversation_history[chat_id].append({"role": "user", "content": user_text})
@@ -395,7 +371,7 @@ if __name__ == "__main__":
     print(f"🌍 Доступ: ИЗ ЛЮБОГО РЕГИОНА")
     print(f"💰 Цена: ПОЛНОСТЬЮ БЕСПЛАТНО")
     print(f"📚 Память: {MAX_HISTORY} сообщений")
-    print(f"🤖 Текущая модель: {current_model}")
+    print(f"🤖 Модель по умолчанию: {current_model}")
     print("=" * 60)
     print("✅ Бот работает! Нажми Ctrl+C для остановки")
     print("📝 Логи сообщений будут появляться здесь:")
